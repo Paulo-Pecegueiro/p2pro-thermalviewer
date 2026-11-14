@@ -212,6 +212,16 @@ class CameraWorker:
         cam = None
 
 
+NO_CACHE = {'Cache-Control': 'no-cache'}  # the browser revalidates (ETag) and gets a new UI version at once
+
+
+class UiFiles(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(NO_CACHE)
+        return response
+
+
 def parse_rate(params):
     'optional ?rate=<max frame messages per second>'
     rate = params.get('rate')
@@ -258,7 +268,7 @@ def create_app(cam_id=None, rois_path=None):
         return JSONResponse({'error': msg}, status_code=status)
 
     async def index(request):
-        return FileResponse(os.path.join(STATIC, 'index.html'))
+        return FileResponse(os.path.join(STATIC, 'index.html'), headers=NO_CACHE)
 
     async def api_status(request):
         w = state['worker']
@@ -394,7 +404,7 @@ def create_app(cam_id=None, rois_path=None):
         Route('/api/orientation', api_orientation, methods=['GET', 'PUT']),
         WebSocketRoute('/ws/live', ws_live),
         WebSocketRoute('/ws/data', ws_data),
-        Mount('/static', StaticFiles(directory=STATIC), name='static'),
+        Mount('/static', UiFiles(directory=STATIC), name='static'),
     ]
     return Starlette(routes=routes, lifespan=lifespan)
 
