@@ -1,8 +1,8 @@
 '''
 Collection regions (ROIs) on the thermal image and the per frame statistics.
 
-Coordinates are image pixels of the (un-rotated) sensor image, W x H = 256 x 192:
-x = column (0..W-1), y = row (0..H-1). Pixel (i, j) covers [i, i+1) x [j, j+1), its center is (i+0.5, j+0.5).
+Coordinates are image pixels of the oriented image (see orientation.py), W x H = 256 x 192, 192 x 256 when
+rotated by 90 or 270 degrees: x = column (0..W-1), y = row (0..H-1). Pixel (i, j) covers [i, i+1) x [j, j+1), its center is (i+0.5, j+0.5).
 
 ROI definitions (JSON):
   point : {"id": "p1", "type": "point",  "x": 10, "y": 20}                    -> the single pixel (x, y)
@@ -17,6 +17,8 @@ import threading
 import unicodedata
 
 import numpy as np
+
+from orientation import Orientation, remap_roi
 
 ID_MAX_LEN = 64
 GEOMETRY_KEYS = {'point': ('x', 'y'), 'rect': ('x', 'y', 'w', 'h'), 'circle': ('cx', 'cy', 'r')}
@@ -154,31 +156,64 @@ def global_stats(temp):
 
 
 class RoiSet:
-    'thread safe, ordered set of ROIs, optionally persisted to a JSON file'
+    '''thread safe, ordered set of ROIs and the image orientation they refer to, optionally persisted to a JSON
+    file: {"orientation": {...}, "rois": [...]} (a plain list of ROIs is read as not rotated)'''
 
-    def __init__(self, shape, path=None):
-        self.shape = shape
+    def __init__(self, sensor_shape, path=None):
+        self.sensor_shape = sensor_shape
         self.path = path
         self._lock = threading.Lock()
         self._rois = {}
+        self.orientation = Orientation()
         if path and os.path.exists(path):
             with open(path, encoding='utf-8') as f:
-                for d in json.load(f):
-                    roi = Roi.from_dict(d, shape)
-                    self._rois[roi.id] = roi
+                data = json.load(f)
+            if isinstance(data, dict):
+                self.orientation = Orientation.from_dict(data.get('orientation', {}))
+                data = data.get('rois', [])
+            for d in data:
+                roi = Roi.from_dict(d, self.shape)
+                self._rois[roi.id] = roi
+
+    @property
+    def shape(self):
+        'rows, cols of the oriented image'
+        return self.orientation.shape(self.sensor_shape)
 
     def _save(self):
         if not self.path:
             return
         tmp = self.path + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump([r.to_dict() for r in self._rois.values()], f, indent=1, ensure_ascii=False)
+            json.dump({'orientation': self.orientation.to_dict(), 'rois': [r.to_dict() for r in self._rois.values()]},
+                      f, indent=1, ensure_ascii=False)
         os.replace(tmp, self.path)
 
     def snapshot(self):
         'list of the current ROIs (the ROI objects are immutable)'
         with self._lock:
             return list(self._rois.values())
+
+    def state(self):
+        '(orientation, ROIs) at the same moment: the ROIs always match the orientation'
+        with self._lock:
+            return self.orientation, list(self._rois.values())
+
+    def set_orientation(self, changes):
+        '''changes the orientation (all or some of rotate, flip_h, flip_v). All ROIs, also locked ones, are
+        moved with the image: they keep covering the same sensor pixels. Returns the new orientation.'''
+        with self._lock:
+            old = self.orientation
+            new = Orientation.from_dict(changes, old)
+            if new == old:
+                return new.to_dict()
+            shape = new.shape(self.sensor_shape)
+            rois = {}
+            for k, r in self._rois.items():
+                rois[k] = Roi.from_dict(remap_roi(r.to_dict(), old, new, self.sensor_shape), shape)
+            self.orientation, self._rois = new, rois
+            self._save()
+        return new.to_dict()
 
     def definitions(self):
         return [r.to_dict() for r in self.snapshot()]
@@ -195,8 +230,8 @@ class RoiSet:
         if isinstance(d, dict) and not str(d.get('id') or '').strip():
             with self._lock:
                 d = {**d, 'id': self._next_id(d.get('type'))}
-        roi = Roi.from_dict(d, self.shape)
-        with self._lock:
+        with self._lock:  # the shape changes with the orientation
+            roi = Roi.from_dict(d, self.shape)
             if roi.id in self._rois:
                 raise RoiConflict(f'id "{roi.id}" already exists')
             self._rois[roi.id] = roi
@@ -249,8 +284,8 @@ class RoiSet:
             return deleted, len(keep)
 
 
-def build_message(temp, rois, ts_ms, frame_no, ts_source='host'):
-    '''the data stream message of one frame
+def build_message(temp, rois, ts_ms, frame_no, ts_source='host', orientation=None):
+    '''the data stream message of one frame, temp is the oriented temperature image
     ts_source: "driver" = capture time of the frame from the camera driver, "host" = time the frame was read'''
     h, w = temp.shape
     return {
@@ -261,6 +296,7 @@ def build_message(temp, rois, ts_ms, frame_no, ts_source='host'):
         'unit': 'C',
         'width': int(w),
         'height': int(h),
+        'orientation': (orientation or Orientation()).to_dict(),
         'global': global_stats(temp),
         'rois': [r.stats(temp) for r in rois],
     }

@@ -11,6 +11,7 @@ Data stream (JSON messages, see README / roi.build_message):
   "type": "frame"  one per camera frame
   "type": "status" camera connected/disconnected, sent on every change and when a client connects
 ROIs (REST): GET/POST/DELETE /api/rois, PATCH/DELETE /api/rois/{id}
+Orientation (rotation/mirroring of the image, the ROIs move with it): GET/PUT /api/orientation
 Full temperature image: GET /api/frame
 Live view (browser): ws://<host>:<port>/ws/live, the JSON messages above, each frame message followed by one binary
   message: header '<4sHHId' (b'P2PR', width, height, frame, ts_ms) + width*height uint16 little endian raw values,
@@ -38,6 +39,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from orientation import OrientationError
 from p2pro import p2pro, P2PRO_ROWS, P2PRO_COLS
 from roi import RoiSet, RoiError, RoiNotFound, RoiConflict, RoiLocked, build_message
 
@@ -45,7 +47,7 @@ log = logging.getLogger('thermal_server')
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, 'static')
 FRAME_HEADER = struct.Struct('<4sHHId')
-SHAPE = (P2PRO_ROWS, P2PRO_COLS)
+SENSOR_SHAPE = (P2PRO_ROWS, P2PRO_COLS)
 STALL_S = 2.0          # no frame for this long -> camera reported as disconnected
 MAX_DRIVER_LAG_MS = 1000  # driver timestamps older than this are not trusted
 
@@ -193,10 +195,11 @@ class CameraWorker:
             ts_ms, ts_source = self._timestamp_ms(cam)
             self.last_frame_t = time.monotonic()
             self.set_connected(True, None, str(cam.cam_id))
-            raw = p2pro.frame_raw(frame)
+            orientation, rois = self.rois.state()
+            raw = np.ascontiguousarray(orientation.apply(p2pro.frame_raw(frame)))
             temp = p2pro.raw_to_celsius(raw).astype(np.float32)
             frame_no += 1
-            msg = build_message(temp, self.rois.snapshot(), ts_ms, frame_no, ts_source)
+            msg = build_message(temp, rois, ts_ms, frame_no, ts_source, orientation)
             h, w = raw.shape
             frame_bytes = FRAME_HEADER.pack(b'P2PR', w, h, frame_no % 2**32, float(ts_ms)) + raw.astype('<u2').tobytes()
             self.latest = (msg, temp)
@@ -232,7 +235,7 @@ def roi_error_status(ex):
 
 def create_app(cam_id=None, rois_path=None):
     hub = Hub()
-    rois = RoiSet(SHAPE, rois_path)
+    rois = RoiSet(SENSOR_SHAPE, rois_path)
     state = {}
 
     @contextlib.asynccontextmanager
@@ -259,9 +262,11 @@ def create_app(cam_id=None, rois_path=None):
 
     async def api_status(request):
         w = state['worker']
+        orientation, current = rois.state()
+        h, wd = orientation.shape(SENSOR_SHAPE)
         return JSONResponse({**w.status, 'last_frame_age_s': round(time.monotonic() - w.last_frame_t, 2),
-                             'clients': len(hub.clients), 'rois': len(rois.snapshot()),
-                             'width': SHAPE[1], 'height': SHAPE[0]})
+                             'clients': len(hub.clients), 'rois': len(current),
+                             'width': wd, 'height': h, 'orientation': orientation.to_dict()})
 
     async def api_latest(request):
         latest = state['worker'].latest
@@ -306,6 +311,14 @@ def create_app(cam_id=None, rois_path=None):
             return JSONResponse(rois.update(roi_id, await read_json(request)))
         except RoiError as ex:
             return error(str(ex), roi_error_status(ex))
+
+    async def api_orientation(request: Request):
+        if request.method == 'GET':
+            return JSONResponse(rois.state()[0].to_dict())
+        try:
+            return JSONResponse(rois.set_orientation(await read_json(request)))
+        except (RoiError, OrientationError) as ex:
+            return error(str(ex))
 
     async def api_stream(request: Request):
         try:
@@ -378,6 +391,7 @@ def create_app(cam_id=None, rois_path=None):
         Route('/api/stream', api_stream),
         Route('/api/rois', api_rois, methods=['GET', 'POST', 'DELETE']),
         Route('/api/rois/{roi_id:path}', api_roi, methods=['PATCH', 'DELETE']),
+        Route('/api/orientation', api_orientation, methods=['GET', 'PUT']),
         WebSocketRoute('/ws/live', ws_live),
         WebSocketRoute('/ws/data', ws_data),
         Mount('/static', StaticFiles(directory=STATIC), name='static'),
@@ -392,7 +406,7 @@ def main():
                          'also after the camera was unplugged and got another /dev/videoN')
     ap.add_argument('--host', default='127.0.0.1', help='use 0.0.0.0 to allow access from other machines (no authentication!)')
     ap.add_argument('--port', type=int, default=8080)
-    ap.add_argument('--rois', default=os.path.join(HERE, 'rois.json'), help='file where the ROIs are stored')
+    ap.add_argument('--rois', default=os.path.join(HERE, 'rois.json'), help='file where the ROIs and the image orientation are stored')
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     print(f'P2Pro thermal server: http://{args.host}:{args.port}  (data stream: ws://{args.host}:{args.port}/ws/data)')
