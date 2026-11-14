@@ -103,6 +103,22 @@
       <div id="roi-error" class="error"></div>
     </section>
     <section>
+      <h2 data-i18n="orient.title"></h2>
+      <div class="orient">
+        <label><span data-i18n="orient.rotate"></span>
+          <select id="rotate" data-i18n-title="orient.rotate.title">
+            <option value="0">0°</option>
+            <option value="90">90°</option>
+            <option value="180">180°</option>
+            <option value="270">270°</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="flip-h"> <span data-i18n="orient.flip_h"></span></label>
+        <label class="check"><input type="checkbox" id="flip-v"> <span data-i18n="orient.flip_v"></span></label>
+      </div>
+      <p class="muted hint" data-i18n="orient.hint"></p>
+    </section>
+    <section>
       <h2 data-i18n="stream.title"></h2>
       <p class="muted" data-i18n-html="stream.desc"></p>
       <ul class="urls">

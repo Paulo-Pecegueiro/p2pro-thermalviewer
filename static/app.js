@@ -145,7 +145,10 @@ function connect() {
     const first = !state.raw;
     state.raw = new Uint16Array(ev.data, HEADER_BYTES, w * h);
     if (state.pendingMsg && state.pendingMsg.frame % 2 ** 32 === frame) {
+      const prev = state.msg;
       state.msg = state.pendingMsg;
+      if (prev && orientKey(prev.orientation) !== orientKey(state.msg.orientation)) orientationChanged();
+      syncOrientation();
       if (state.override && state.override.untilFrame !== null && state.msg.frame > state.override.untilFrame) state.override = null;
     }
     if (first) showState();
@@ -222,6 +225,37 @@ $('clear-all').addEventListener('click', async () => {
   if (r.ok && r.data.kept_locked) notice(t('n.kept', { n: r.data.kept_locked }));
   state.selected = null;
 });
+
+// ---------- orientation (server side, for everyone: rotation then mirroring) ----------
+const orientKey = (o) => (o ? `${o.rotate}/${o.flip_h}/${o.flip_v}` : '');
+let orientPending = null;  // {key, until}: sent, the controls are not reset by frames until it is in the frames
+function syncOrientation() {
+  const o = state.msg && state.msg.orientation;
+  if (!o) return;
+  if (orientPending) {
+    if (orientKey(o) !== orientPending.key && performance.now() < orientPending.until) return;
+    orientPending = null;
+  }
+  $('rotate').value = String(o.rotate);
+  $('flip-h').checked = o.flip_h;
+  $('flip-v').checked = o.flip_v;
+}
+function orientationChanged() {
+  // shapes being drawn/edited are in the old image coordinates
+  state.drag = null;
+  state.edit = null;
+  state.override = null;
+  if (state.form && state.form.mode === 'create') closeForm();
+  state.dirty = true;
+}
+for (const id of ['rotate', 'flip-h', 'flip-v']) {
+  $(id).addEventListener('change', async () => {
+    const o = { rotate: Number($('rotate').value), flip_h: $('flip-h').checked, flip_v: $('flip-v').checked };
+    orientPending = { key: orientKey(o), until: performance.now() + 2000 };
+    const r = await api('PUT', '/api/orientation', o);
+    if (!r.ok) { orientPending = null; syncOrientation(); notice(t('n.orient_failed', { error: r.error || `HTTP ${r.status}` })); }
+  });
+}
 
 // ---------- geometry ----------
 function scale() { return canvas.clientWidth / state.W; }       // screen px per image px
@@ -536,8 +570,11 @@ function resize() {
   off.width = state.W;
   off.height = state.H;
   const dpr = window.devicePixelRatio || 1;
-  const cssW = $('stage').clientWidth;
+  // full width, but not higher than the window (rotated by 90/270 the image is higher than wide)
+  const maxH = Math.max(240, window.innerHeight - 140);
+  const cssW = Math.min($('stage').parentElement.clientWidth, maxH * state.W / state.H);
   const cssH = cssW * state.H / state.W;
+  $('stage').style.width = `${cssW}px`;
   canvas.style.height = `${cssH}px`;
   canvas.width = Math.round(cssW * dpr);
   canvas.height = Math.round(cssH * dpr);
