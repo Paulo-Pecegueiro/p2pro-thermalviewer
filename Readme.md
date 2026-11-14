@@ -12,6 +12,8 @@ Live view and temperature data stream for the Infiray P2Pro thermal camera on Wi
   in the list) or delete (x in the list or the Delete key)
 - a lock per point/area (click the lock on the image or in the list): a locked one can not be moved, edited or deleted
 - the hottest (and coldest) pixel of the whole image with position
+- rotation (0/90/180/270) and mirroring of the image for a camera mounted sideways or upside down, for everybody
+  (UI and data stream); the points/areas move with the image and keep measuring the same spot
 - a **data stream** for other applications: one JSON message per frame with unix epoch timestamp in ms,
   the global values and every point/area with its geometry and values
 - unplugging the camera: the server keeps running, reports it (UI and stream) and reconnects when the camera is back
@@ -25,8 +27,8 @@ python thermal_server.py           # camera auto detected on Linux, otherwise --
 # open http://127.0.0.1:8080
 ```
 Options: `--host 0.0.0.0` makes the server reachable from other machines (**there is no authentication**, everybody
-in the network can see the stream and create/delete areas), `--port`, `--rois <file>` (default `rois.json`, the areas
-survive restarts), `--cam` (without it the camera is found by its USB id, also when it comes back under another
+in the network can see the stream and create/delete areas), `--port`, `--rois <file>` (default `rois.json`, the areas and
+the orientation survive restarts), `--cam` (without it the camera is found by its USB id, also when it comes back under another
 /dev/videoN after unplugging it). Only one program can stream from the camera at a time (close webcam apps like Cheese).
 
 ### Data stream
@@ -35,7 +37,7 @@ survive restarts), `--cam` (without it the camera is found by its USB id, also w
 | WebSocket (push) | `ws://<host>:8080/ws/data` |
 | Server-Sent Events (push, plain HTTP) | `http://<host>:8080/api/stream` |
 | last message (polling) | `GET http://<host>:8080/api/latest` |
-| full temperature image | `GET http://<host>:8080/api/frame` (`temps`: 192 rows x 256 columns, C) |
+| full temperature image | `GET http://<host>:8080/api/frame` (`temps`: `height` rows x `width` columns, C) |
 | server/camera status | `GET http://<host>:8080/api/status` |
 
 The push streams send every frame (~25/s). Add `?rate=N` to get at most N messages per second
@@ -49,6 +51,7 @@ Frame message (one per frame):
   "ts_source": "driver",
   "frame": 1234,
   "unit": "C", "width": 256, "height": 192,
+  "orientation": {"rotate": 0, "flip_h": false, "flip_v": false},
   "global": {"min": 27.8, "max": 34.67, "mean": 31.4, "max_pos": {"x": 123, "y": 170}, "min_pos": {"x": 237, "y": 151}},
   "rois": [
     {"id": "P1", "type": "point", "x": 200, "y": 50, "locked": false, "temp": 32.01},
@@ -63,8 +66,9 @@ Frame message (one per frame):
   each frame when its first data arrives, ~36 ms before the whole frame is received; converted to the wall clock of
   the computer. `"host"` (Windows, or no usable driver time): the time the frame was read. The camera itself has
   no clock with date and time, so the time always comes from the computer.
-- coordinates are image pixels: `x` = column 0..255, `y` = row 0..191 (sensor orientation). Pixel (i, j) covers
-  [i, i+1) x [j, j+1). A rect/circle contains the pixels whose center (i+0.5, j+0.5) lies inside it.
+- coordinates are pixels of the image as sent (after the orientation): `x` = column 0..width-1, `y` = row
+  0..height-1; 256 x 192, or 192 x 256 when rotated by 90/270. Pixel (i, j) covers [i, i+1) x [j, j+1). A rect/circle
+  contains the pixels whose center (i+0.5, j+0.5) lies inside it.
 - temperatures in Celsius, rounded to 0.01. The camera works in the high gain mode (up to ~180 C).
 
 Status message: sent when a client connects and whenever the camera is unplugged/plugged in or stops sending frames
@@ -104,6 +108,17 @@ curl -X DELETE http://127.0.0.1:8080/api/rois                                   
 the type can not change. A locked point/area only accepts a change together with `"locked": false`.
 Errors: 400 invalid definition (outside the image, w/h/r <= 0, ...), 404 id not found, 409 id already exists,
 423 locked. An id has 1..64 characters (no control characters).
+
+### Orientation
+```bash
+curl http://127.0.0.1:8080/api/orientation                                             # {"rotate":0,"flip_h":false,"flip_v":false}
+curl -X PUT http://127.0.0.1:8080/api/orientation -d '{"rotate":90}'                   # any of the 3 keys
+curl -X PUT http://127.0.0.1:8080/api/orientation -d '{"rotate":180,"flip_h":true}'
+```
+The sensor image is first rotated clockwise by `rotate` degrees (0, 90, 180, 270), then mirrored: `flip_h` swaps
+left/right, `flip_v` top/bottom of the rotated image. It applies to all clients and the data stream (each frame
+message carries it). All points/areas, locked ones too, are moved with the image so they keep covering the same
+sensor pixels. A client that stores coordinates should watch `orientation` (or `width`/`height`) in the messages.
 
 ### Live view protocol
 `ws://<host>:8080/ws/live` (used by the browser UI): the status messages and per frame the JSON frame message

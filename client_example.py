@@ -11,7 +11,8 @@ Every message is JSON. One per camera frame:
   "ts": 1731420000123,          unix epoch in ms of the frame capture
   "ts_source": "driver",        "driver" (capture time from the camera driver) or "host" (time it was read)
   "frame": 1234,                frame counter since server start
-  "unit": "C", "width": 256, "height": 192,
+  "unit": "C", "width": 256, "height": 192,       192 x 256 when rotated by 90/270
+  "orientation": {"rotate": 0, "flip_h": false, "flip_v": false},   coordinates are in the oriented image
   "global": {"min": .., "max": .., "mean": .., "max_pos": {"x": .., "y": ..}, "min_pos": {"x": .., "y": ..}},
   "rois": [
     {"id": "P1", "type": "point", "x": 10, "y": 20, "locked": false, "temp": 31.25},
